@@ -11,6 +11,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     pipeline,
+    AutoConfig
 )
 
 try:
@@ -131,19 +132,19 @@ def get_gpus_max_memory(max_memory, num_gpus):
 
 def generate(model, tokenizer, csv_name, out_name):
     data = pandas.read_csv(csv_name)
-    
+
     res = []
     questions = data['questions']
     pipe = pipeline('text-generation', model=model, tokenizer=tokenizer, max_new_tokens=640)
-    
+
     answers = []
-    
+
     for q in questions.values:
         out = pipe(q)
         out = out[0]['generated_text']
         answers.append(out[len(q):])
 
-    
+
     dict = {'questions': list(questions.values), 'answers': answers}
     df = pandas.DataFrame(dict)
     df.to_csv(out_name)
@@ -192,8 +193,24 @@ def main():
             **model_kwargs,
         )
     elif args.modeltype == 'ov_causal':
+        from transformers.generation import GenerationConfig
+        from optimum.utils import (
+            NormalizedTextConfig, NormalizedConfigManager
+        )
+        from optimum.exporters import TasksManager
+
+        TasksManager._SUPPORTED_MODEL_TYPE["stablelm-epoch"] = TasksManager._SUPPORTED_MODEL_TYPE["llama"]
+        stable_lm_config = NormalizedTextConfig.with_args(
+            num_layers='num_hidden_layers',
+            num_attention_heads='num_attention_heads'
+        )
+        NormalizedConfigManager._conf['stablelm_epoch'] = stable_lm_config
+        NormalizedConfigManager._conf["stablelm-epoch"] = stable_lm_config
+
+        config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
         model = OVModelForCausalLM.from_pretrained(
             args.model,
+            config=config,
             **model_kwargs,
         )
     else:
@@ -217,7 +234,7 @@ def main():
             raise ValueError("No eos_token or bos_token found")
     try:
         tokenizer.pad_token = tokenizer.eos_token
-        
+
     # Some models like CodeGeeX2 have pad_token as a read-only property
     except AttributeError:
         print("Not setting pad_token to eos_token")
