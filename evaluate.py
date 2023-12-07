@@ -7,6 +7,8 @@ from tqdm import tqdm
 import numpy as np
 from transformers import AutoTokenizer
 from difflib import SequenceMatcher
+from transformers import AutoTokenizer
+from difflib import SequenceMatcher
 
 def parse_args():
     parser = argparse.ArgumentParser(
