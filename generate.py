@@ -1,7 +1,7 @@
-import fnmatch
 import argparse
 import pandas
-
+import shutil
+from pathlib import Path
 import datasets
 import torch
 import transformers
@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 try:
     from optimum.intel import OVModelForCausalLM
+    from optimum.intel.openvino import OVQwenModel
 except ImportError:
     print("Not import optimum.intel")
 
@@ -47,6 +48,7 @@ def parse_args():
     )
     parser.add_argument(
         "--trust_remote_code",
+        default=True,
         action="store_true",
         help="Use a model with custom code, this requires executing code by the author of the model.",
     )
@@ -97,29 +99,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def pattern_match(patterns, source_list):
-    """Returns a list containing all values of the source_list that
-    match at least one of the patterns"""
-    task_names = set()
-    for pattern in patterns:
-        for matching in fnmatch.filter(source_list, pattern):
-            task_names.add(matching)
-    return list(task_names)
-
-
-def get_gpus_max_memory(max_memory, num_gpus):
-    max_memory = {i: max_memory for i in range(num_gpus)}
-    print("Loading model via these GPUs & max memories: ", max_memory)
-    return max_memory
-
-
 def generate(model, tokenizer, device, csv_name, out_name, max_new_tokens):
     data = pandas.read_csv(csv_name)
     questions = data['questions']
     pipe = pipeline('text-generation', model=model, tokenizer=tokenizer, max_new_tokens=max_new_tokens, device=device)
-    
+
     answers = []
-    
+
     for q in tqdm(questions.values):
         out = pipe(q)
         out = out[0]['generated_text']
@@ -132,112 +118,125 @@ def generate(model, tokenizer, device, csv_name, out_name, max_new_tokens):
 
 def main():
     args = parse_args()
-    transformers.logging.set_verbosity_error()
-    datasets.logging.set_verbosity_error()
+    model_dir = '/home/nlyaly/projects/lm-evaluation-harness/cache/qwen-7b-chat'
 
-    accelerator = Accelerator()
-
-
-    # here we generate code and save it (evaluation is optional but True by default)
-    dict_precisions = {
-        "fp32": torch.float32,
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-    }
-    if args.precision not in dict_precisions:
-        raise ValueError(
-            f"Non valid precision {args.precision}, choose from: fp16, fp32, bf16"
-        )
-
-    model_kwargs = {
-        "revision": args.revision,
-        "trust_remote_code": args.trust_remote_code,
-        "use_auth_token": args.use_auth_token,
-    }
-    if args.load_in_8bit:
-        print("Loading model in 8bit")
-        model_kwargs["load_in_8bit"] = args.load_in_8bit
-        model_kwargs["device_map"] = {"": accelerator.process_index}
-    elif args.load_in_4bit:
-        print("Loading model in 4bit")
-        model_kwargs["load_in_4bit"] = args.load_in_4bit
-        model_kwargs["device_map"] = {"": accelerator.process_index}
-    elif args.modeltype != 'ov_causal':
-        print(f"Loading model in {args.precision}")
-        model_kwargs["torch_dtype"] = dict_precisions[args.precision]
-
-
-    if args.modeltype == "causal":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            **model_kwargs,
-        ).to(device)
-    elif args.modeltype == 'ov_causal':
-        device = 'cpu'
+    for exp_dir in Path(model_dir).iterdir():
         try:
-            model = OVModelForCausalLM.from_pretrained(
-                args.model,
-                **model_kwargs,
-            )
-        except:
-            from optimum.utils import NormalizedTextConfig, NormalizedConfigManager
-            from optimum.exporters import TasksManager
-            
-            TasksManager._SUPPORTED_MODEL_TYPE[
-                "stablelm-epoch"
-            ] = TasksManager._SUPPORTED_MODEL_TYPE["llama"]
-            NormalizedConfigManager._conf[
-                "stablelm-epoch"
-            ] = NormalizedTextConfig.with_args(
-                num_layers="num_hidden_layers",
-                num_attention_heads="num_attention_heads",
-            )
-            config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
-            model = OVModelForCausalLM.from_pretrained(
-                args.model,
-                config=config,
-                trust_remote_code=True,
-                use_cache=True,
-            )
-    else:
-        raise ValueError(
-            f"Non valid modeltype {args.modeltype}, choose from: causal, ov_causal"
-        )
+            prediction_file = exp_dir / 'generations.csv'
+            if prediction_file.exists():
+                continue
+            exp_name = exp_dir.name
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        revision=args.revision,
-        trust_remote_code=args.trust_remote_code,
-        use_auth_token=args.use_auth_token,
-        truncation_side="left",
-        padding_side="right",  # padding on the right is needed to cut off padding in `complete_code`
-    )
-    if not tokenizer.eos_token:
-        if tokenizer.bos_token:
-            tokenizer.eos_token = tokenizer.bos_token
-            print("bos_token used as eos_token")
-        else:
-            raise ValueError("No eos_token or bos_token found")
-    try:
-        tokenizer.pad_token = tokenizer.eos_token
-        
-    # Some models like CodeGeeX2 have pad_token as a read-only property
-    except AttributeError:
-        print("Not setting pad_token to eos_token")
-        pass
-    WIZARD_LLAMA_MODELS = [
-        "WizardLM/WizardCoder-Python-34B-V1.0",
-        "WizardLM/WizardCoder-34B-V1.0",
-        "WizardLM/WizardCoder-Python-13B-V1.0"
-    ]
-    if args.model in WIZARD_LLAMA_MODELS:
-        tokenizer.bos_token = "<s>"
-        tokenizer.bos_token_id = 1
-        print("Changing bos_token to <s>")
+            transformers.logging.set_verbosity_error()
+            datasets.logging.set_verbosity_error()
+            accelerator = Accelerator()
 
-    generate(model, tokenizer, device, args.csv, args.save_generations_path, args.max_length_generation)
+            # here we generate code and save it (evaluation is optional but True by default)
+            dict_precisions = {
+                "fp32": torch.float32,
+                "fp16": torch.float16,
+                "bf16": torch.bfloat16,
+            }
+            if args.precision not in dict_precisions:
+                raise ValueError(
+                    f"Non valid precision {args.precision}, choose from: fp16, fp32, bf16"
+                )
 
+            model_kwargs = {
+                "revision": args.revision,
+                "trust_remote_code": args.trust_remote_code,
+                "use_auth_token": args.use_auth_token,
+            }
+            if args.load_in_8bit:
+                print("Loading model in 8bit")
+                model_kwargs["load_in_8bit"] = args.load_in_8bit
+                model_kwargs["device_map"] = {"": accelerator.process_index}
+            elif args.load_in_4bit:
+                print("Loading model in 4bit")
+                model_kwargs["load_in_4bit"] = args.load_in_4bit
+                model_kwargs["device_map"] = {"": accelerator.process_index}
+            elif args.modeltype != 'ov_causal':
+                print(f"Loading model in {args.precision}")
+                model_kwargs["torch_dtype"] = dict_precisions[args.precision]
+
+
+            if args.modeltype == "causal":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.model,
+                    **model_kwargs,
+                ).to(device)
+            elif args.modeltype == 'ov_causal':
+                device = 'cpu'
+                try:
+                    model = OVQwenModel.from_pretrained(
+                        exp_dir,
+                        **model_kwargs,
+                    )
+                except:
+                    from optimum.utils import NormalizedTextConfig, NormalizedConfigManager
+                    from optimum.exporters import TasksManager
+
+                    NormalizedConfigManager._conf['qwen'] = NormalizedTextConfig.with_args(
+                        num_layers='num_hidden_layers', num_attention_heads='num_attention_heads', hidden_size='hidden_size')
+                    TasksManager._SUPPORTED_MODEL_TYPE[
+                        "stablelm-epoch"
+                    ] = TasksManager._SUPPORTED_MODEL_TYPE["llama"]
+                    NormalizedConfigManager._conf[
+                        "stablelm-epoch"
+                    ] = NormalizedTextConfig.with_args(
+                        num_layers="num_hidden_layers",
+                        num_attention_heads="num_attention_heads",
+                    )
+                    config = AutoConfig.from_pretrained(exp_dir, trust_remote_code=True)
+                    # model = OVModelForCausalLM.from_pretrained(
+                    model = OVQwenModel.from_pretrained(
+                        exp_dir,
+                        config=config,
+                        trust_remote_code=True,
+                        use_cache=True,
+                    )
+            else:
+                raise ValueError(
+                    f"Non valid modeltype {args.modeltype}, choose from: causal, ov_causal"
+                )
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                exp_dir,
+                revision=args.revision,
+                trust_remote_code=args.trust_remote_code,
+                use_auth_token=args.use_auth_token,
+                truncation_side="left",
+                padding_side="right",  # padding on the right is needed to cut off padding in `complete_code`
+            )
+            # if not tokenizer.eos_token:
+            #     if tokenizer.bos_token:
+            #         tokenizer.eos_token = tokenizer.bos_token
+            #         print("bos_token used as eos_token")
+            #     else:
+            #         raise ValueError("No eos_token or bos_token found")
+            # try:
+            #     tokenizer.pad_token = tokenizer.eos_token
+
+            # Some models like CodeGeeX2 have pad_token as a read-only property
+            # except AttributeError:
+            #     print("Not setting pad_token to eos_token")
+            #     pass
+            WIZARD_LLAMA_MODELS = [
+                "WizardLM/WizardCoder-Python-34B-V1.0",
+                "WizardLM/WizardCoder-34B-V1.0",
+                "WizardLM/WizardCoder-Python-13B-V1.0"
+            ]
+            if args.model in WIZARD_LLAMA_MODELS:
+                tokenizer.bos_token = "<s>"
+                tokenizer.bos_token_id = 1
+                print("Changing bos_token to <s>")
+
+            generate(model, tokenizer, device, args.csv, prediction_file, args.max_length_generation)
+        finally:
+            model_cache_dir = exp_dir / 'model_cache'
+            if model_cache_dir.exists():
+                shutil.rmtree(model_cache_dir)
 
 if __name__ == "__main__":
     main()

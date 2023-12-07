@@ -135,8 +135,11 @@ def main():
 
     data_gold = pd.read_csv(args.gold)
     all_metrics_per_file = {}
-    for prediction_file in Path(args.prediction).iterdir():
-        file_name = prediction_file.name
+    for exp_dir in Path(args.prediction).iterdir():
+        exp_name = exp_dir.name
+        prediction_file = exp_dir / "generations.csv"
+        if not prediction_file.exists():
+            continue
         data_prediction = pd.read_csv(prediction_file)
 
         all_metrics_per_question = {}
@@ -161,7 +164,7 @@ def main():
             all_metrics_per_question.update(metric_per_question)
 
         # print(pd.DataFrame([all_metrics]))
-        all_metrics_per_file[file_name] = all_metrics
+        all_metrics_per_file[exp_name] = all_metrics
 
     # print(json.dumps(all_metrics_per_file, indent=4))
     df = pd.DataFrame(all_metrics_per_file).transpose()
