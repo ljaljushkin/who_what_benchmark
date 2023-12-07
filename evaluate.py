@@ -1,5 +1,7 @@
 import argparse
 import pandas as pd
+from pathlib import Path
+import json
 
 from tqdm import tqdm
 import numpy as np
@@ -130,36 +132,44 @@ def main():
     metrics = args.metrics
 
     data_gold = pd.read_csv(args.gold)
-    data_prediction = pd.read_csv(args.prediction)
+    all_metrics_per_file = {}
+    for prediction_file in Path(args.prediction).iterdir():
+        file_name = prediction_file.name
+        data_prediction = pd.read_csv(prediction_file)
 
-    all_metrics_per_question = {}
-    all_metrics = {}
-    if 'similarity' in metrics:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer(args.model)
-        metric_dict, metric_per_question = evaluate_similarity(model, data_gold, data_prediction)
-        all_metrics.update(metric_dict)
-        all_metrics_per_question.update(metric_per_question)
-    if 'divergency' in metrics:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.tokenizer_path,
-            revision=None,
-            trust_remote_code=True,
-            use_auth_token=True,
-            truncation_side="left",
-            padding_side="right",  # padding on the right is needed to cut off padding in `complete_code`
-        )
-        metric_dict, metric_per_question = evaluate_divergency(tokenizer, data_gold, data_prediction)
-        all_metrics.update(metric_dict)
-        all_metrics_per_question.update(metric_per_question)
+        all_metrics_per_question = {}
+        all_metrics = {}
+        if 'similarity' in metrics:
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer(args.model)
+            metric_dict, metric_per_question = evaluate_similarity(model, data_gold, data_prediction)
+            all_metrics.update(metric_dict)
+            all_metrics_per_question.update(metric_per_question)
+        if 'divergency' in metrics:
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.tokenizer_path,
+                revision=None,
+                trust_remote_code=True,
+                use_auth_token=True,
+                truncation_side="left",
+                padding_side="right",  # padding on the right is needed to cut off padding in `complete_code`
+            )
+            metric_dict, metric_per_question = evaluate_divergency(tokenizer, data_gold, data_prediction)
+            all_metrics.update(metric_dict)
+            all_metrics_per_question.update(metric_per_question)
 
-    print(pd.DataFrame([all_metrics]))
+        # print(pd.DataFrame([all_metrics]))
+        all_metrics_per_file[file_name] = all_metrics
 
-    if args.save_evaluation_path is not None:
-        res_data = {'questions': list(data_gold['questions'].values), **all_metrics_per_question}
-        df = pd.DataFrame(res_data)
-        print(df)
-        df.to_csv(args.save_evaluation_path)
+    # print(json.dumps(all_metrics_per_file, indent=4))
+    df = pd.DataFrame(all_metrics_per_file).transpose()
+    print(df)
+    df.to_csv(args.save_evaluation_path)
+        # if args.save_evaluation_path is not None:
+        #     res_data = {'questions': list(data_gold['questions'].values), **all_metrics_per_question}
+        #     df = pd.DataFrame(res_data)
+        #     print(df)
+        #     df.to_csv(args.save_evaluation_path)
 
 if __name__ == "__main__":
     main()
