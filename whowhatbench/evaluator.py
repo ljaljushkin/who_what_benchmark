@@ -131,7 +131,8 @@ class Evaluator():
             inputs = self.tokenizer(q, return_tensors="pt").to(model.device)
             tokens = model.generate(**inputs, max_new_tokens=self.max_new_tokens)
             out = self.tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
-            answers.append(out[len(q):])
+            #answers.append(out[len(q):])
+            answers.append(out)
 
         res_data = {'questions': list(questions.values), 'answers': answers}
         df = pd.DataFrame(res_data)
